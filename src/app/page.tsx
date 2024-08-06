@@ -34,28 +34,15 @@ export default function Home() {
     });
   }
   // 交给worker计算hash值
-  async function workerCalculateHash(file: File): Promise<string[]>;
-  async function workerCalculateHash(file: string): Promise<string>;
-  async function workerCalculateHash(
-    file: File | string
-  ): Promise<string[] | string> {
+  async function workerCalculateFileHash(file: File) {
     const { default: WorkerModule } = (await import(
       "../workers/file.worker"
     )) as typeof import("worker-loader!*");
     return new Promise((resolve, reject) => {
-      if (typeof file === "string") {
-        const worker = new WorkerModule();
-        worker.postMessage({ file });
-        return (worker.onmessage = (event) => {
-          resolve(event.data);
-          worker.terminate();
-        });
-      }
-
       let finishThreadCount = 0;
       const result: string[] = [];
       const chunkSize = 5 * 1024 * 1024; // 切片大小
-      const threadCount = navigator.hardwareConcurrency || 2; // 线程数量
+      const threadCount = navigator.hardwareConcurrency - 1 || 4; // 线程数量
       const chunkCount = Math.ceil(file.size / chunkSize); // 切片总数
       const threadChunkCount = Math.ceil(chunkCount / threadCount); // 线程的切片数量
 
@@ -144,13 +131,17 @@ export default function Home() {
         <input
           type="file"
           onChange={async (e) => {
-            const startTime = performance.now();
-            console.log("select file", e.target.files?.[0]);
-            const chunksHash = await workerCalculateHash(e.target.files?.[0]!);
-            const fileHash = await workerCalculateHash(chunksHash.toString());
-            console.log("hash", chunksHash, fileHash);
-            const endTime = performance.now();
-            console.log(`Execution time: ${endTime - startTime} milliseconds`);
+            try {
+              const startTime = performance.now();
+              const hash = await workerCalculateFileHash(e.target.files?.[0]!);
+              console.log("hash", hash);
+              const endTime = performance.now();
+              console.log(
+                `Execution time: ${endTime - startTime} milliseconds`
+              );
+            } catch (error) {
+              console.log("error", error);
+            }
           }}
         />
       </div>
