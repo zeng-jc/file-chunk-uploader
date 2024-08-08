@@ -55,7 +55,7 @@ async function calculateHash(
     })
   );
 }
- 
+
 self.addEventListener("message", async ({ data }: { data: FileParams }) => {
   try {
     const { file, start, end, chunkSize } = data;
@@ -69,4 +69,8 @@ self.addEventListener("message", async ({ data }: { data: FileParams }) => {
   }
 });
 
-export {};
+export default class fileWorker extends Worker {
+  constructor() {
+    super("");
+  }
+}

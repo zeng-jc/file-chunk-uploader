@@ -2,13 +2,29 @@
 import SparkMD5 from "spark-md5";
 import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { limitConcurrentRequests } from "@/utils";
+import TestWorker from "../workers/test.worker";
 
 export default function Home() {
   const [fileListStatus, setFileListStatus] = useState<{
     [key: string]: { index: number; percent: number };
   }>({});
+
+  // 线程数量
+  const THREAD_COUNT_REF = useRef(0);
+  const CHUNK_SIZE = 5 * 1024 * 1024;
+  useEffect(() => {
+    const threadCount = navigator.hardwareConcurrency || 4;
+    for (let i = 0; i < threadCount; i++) {
+      const testWorker = new TestWorker();
+      testWorker.postMessage(1);
+      testWorker.onmessage = () => {
+        THREAD_COUNT_REF.current++;
+        testWorker.terminate();
+      };
+    }
+  }, []);
 
   // 文件切片
   function createChunks(file: File, chunkSize = 10 * 1024 * 1024) {
@@ -30,33 +46,40 @@ export default function Home() {
   }
 
   // 交给worker计算hash值
-  async function workerCalculateHash(file: File): Promise<string[]>;
+  async function workerCalculateHash(
+    file: File,
+    options: {
+      chunkSize: number;
+      threadCount: number;
+    }
+  ): Promise<string[]>;
   async function workerCalculateHash(file: string): Promise<string>;
   async function workerCalculateHash(
-    file: File | string
+    file: File | string,
+    options?: {
+      chunkSize: number;
+      threadCount: number;
+    }
   ): Promise<string[] | string> {
-    const { default: WorkerModule } = (await import(
-      "../workers/file.worker"
-    )) as typeof import("worker-loader!*");
+    const { default: FileWorker } = await import("../workers/file.worker");
     return new Promise((resolve, reject) => {
-      if (typeof file === "string") {
-        const worker = new WorkerModule();
+      if (typeof file === "string" || !options) {
+        const worker = new FileWorker();
         worker.postMessage({ file });
         return (worker.onmessage = (event) => {
-          resolve(event.data);
+          resolve(event.data as string);
           worker.terminate();
         });
       }
 
+      const { chunkSize, threadCount } = options;
       let finishThreadCount = 0;
       const result: string[] = [];
-      const chunkSize = 5 * 1024 * 1024; // 切片大小
-      const threadCount = navigator.hardwareConcurrency - 3 || 2; // 线程数量
       const chunkCount = Math.ceil(file.size / chunkSize); // 切片总数
       const threadChunkCount = Math.ceil(chunkCount / threadCount); // 线程的切片数量
 
       for (let i = 0; i < threadCount; i++) {
-        const worker = new WorkerModule();
+        const worker = new FileWorker();
         const start = i * threadChunkCount;
         let end = (i + 1) * threadChunkCount;
         if (end > chunkCount) return (end = chunkCount);
@@ -70,11 +93,6 @@ export default function Home() {
           result[i] = event.data;
           worker.terminate();
           if (++finishThreadCount === threadCount) resolve(result.flat());
-          console.log(
-            "finishThreadCount",
-            finishThreadCount,
-            navigator.hardwareConcurrency
-          );
         };
         worker.onerror = reject;
       }
@@ -109,16 +127,13 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then((data) => {
-        setFileListStatus((preState) => {
-          console.log("preState", preState[fileHash]?.percent, percentComplete);
-          return {
-            ...preState,
-            [fileHash]: {
-              index: preState[fileHash]?.index ?? 0,
-              percent: (preState[fileHash]?.percent ?? 0) + percentComplete,
-            },
-          };
-        });
+        setFileListStatus((preState) => ({
+          ...preState,
+          [fileHash]: {
+            index: preState[fileHash]?.index ?? 0,
+            percent: (preState[fileHash]?.percent ?? 0) + percentComplete,
+          },
+        }));
       });
   }
 
@@ -148,21 +163,23 @@ export default function Home() {
             const startTime = performance.now();
             const file = e.target.files?.[0];
             if (!file) return;
-            const chunksHash = await workerCalculateHash(file);
+            const chunksHash = await workerCalculateHash(file, {
+              threadCount: THREAD_COUNT_REF.current,
+              chunkSize: CHUNK_SIZE,
+            });
             const fileHash = await workerCalculateHash(chunksHash.toString());
             console.log("hash", chunksHash, fileHash);
             const endTime = performance.now();
             console.log(`Execution time: ${endTime - startTime} milliseconds`);
-            const chunkSize = 5 * 1024 * 1024;
             // 生成每个分片的请求函数
             const uploadFiles: (() => Promise<any>)[] = [];
-            for (let i = 0, j = 0; i < file.size; i += chunkSize, j++) {
+            for (let i = 0, j = 0; i < file.size; i += CHUNK_SIZE, j++) {
               // 利用闭包携带参数
               const outerFn = (params: any) => () => uploadFile(params);
               uploadFiles.push(
                 outerFn({
                   fileName: file.name,
-                  fileChunk: file.slice(i, i + chunkSize),
+                  fileChunk: file.slice(i, i + CHUNK_SIZE),
                   index: j,
                   fileHash,
                   chunksHash,
