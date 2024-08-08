@@ -75,14 +75,16 @@ export default function Home() {
       const { chunkSize, threadCount } = options;
       let finishThreadCount = 0;
       const result: string[] = [];
-      const chunkCount = Math.ceil(file.size / chunkSize); // 切片总数
-      const threadChunkCount = Math.ceil(chunkCount / threadCount); // 线程的切片数量
-
-      for (let i = 0; i < threadCount; i++) {
+      const chunksCount = Math.ceil(file.size / chunkSize); // 切片总数
+      const threadChunkCount = Math.ceil(chunksCount / threadCount); // 线程的切片数量
+      const createWorkerCount =
+        chunksCount < threadCount ? chunksCount : threadCount;
+      console.log(createWorkerCount);
+      for (let i = 0; i < createWorkerCount; i++) {
         const worker = new FileWorker();
         const start = i * threadChunkCount;
         let end = (i + 1) * threadChunkCount;
-        if (end > chunkCount) return (end = chunkCount);
+        if (end > chunksCount) end = chunksCount;
         worker.postMessage({
           file,
           start,
@@ -92,7 +94,7 @@ export default function Home() {
         worker.onmessage = (event) => {
           result[i] = event.data;
           worker.terminate();
-          if (++finishThreadCount === threadCount) resolve(result.flat());
+          if (++finishThreadCount === createWorkerCount) resolve(result.flat());
         };
         worker.onerror = reject;
       }
