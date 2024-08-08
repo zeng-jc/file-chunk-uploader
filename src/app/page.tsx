@@ -1,8 +1,15 @@
 "use client";
 import SparkMD5 from "spark-md5";
 import BallMoveAnimation from "./components/ballMoveAnimation";
+import Progress from "./components/progress";
+import { useState } from "react";
+import { limitConcurrentRequests } from "@/utils";
 
 export default function Home() {
+  const [fileListStatus, setFileListStatus] = useState<{
+    [key: string]: { index: number; percent: number };
+  }>({});
+
   // 文件切片
   function createChunks(file: File, chunkSize = 10 * 1024 * 1024) {
     const chunks: Blob[] = [];
@@ -11,38 +18,40 @@ export default function Home() {
     }
     return chunks;
   }
-  // 增量计算文件hash，而不是一次性将整个文件加载到内存中计算，防止内存撑爆
-  function calculateFileHash(chunks: Blob[]) {
-    const spark = new SparkMD5.ArrayBuffer();
-    return new Promise((resolve, reject) => {
-      function _recursionRead(i: number) {
-        if (i >= chunks.length) {
-          resolve(spark.end());
-          return;
-        }
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const bytes = event.target?.result; // 字节数组
-          if (!bytes) return;
-          spark.append(bytes as ArrayBuffer);
-          _recursionRead(i + 1);
-        };
-        reader.readAsArrayBuffer(chunks[i]);
-        reader.onerror = reject;
-      }
-      _recursionRead(0);
-    });
+
+  // 计算文件切片的hash
+  async function calculateChunksHash(chunks: Blob[]) {
+    return Promise.all(
+      chunks.map(async (chunk) => {
+        const bytes = await chunk.arrayBuffer();
+        return SparkMD5.ArrayBuffer.hash(bytes);
+      })
+    );
   }
+
   // 交给worker计算hash值
-  async function workerCalculateFileHash(file: File) {
+  async function workerCalculateHash(file: File): Promise<string[]>;
+  async function workerCalculateHash(file: string): Promise<string>;
+  async function workerCalculateHash(
+    file: File | string
+  ): Promise<string[] | string> {
     const { default: WorkerModule } = (await import(
       "../workers/file.worker"
     )) as typeof import("worker-loader!*");
     return new Promise((resolve, reject) => {
+      if (typeof file === "string") {
+        const worker = new WorkerModule();
+        worker.postMessage({ file });
+        return (worker.onmessage = (event) => {
+          resolve(event.data);
+          worker.terminate();
+        });
+      }
+
       let finishThreadCount = 0;
       const result: string[] = [];
       const chunkSize = 5 * 1024 * 1024; // 切片大小
-      const threadCount = navigator.hardwareConcurrency - 1 || 4; // 线程数量
+      const threadCount = navigator.hardwareConcurrency - 3 || 2; // 线程数量
       const chunkCount = Math.ceil(file.size / chunkSize); // 切片总数
       const threadChunkCount = Math.ceil(chunkCount / threadCount); // 线程的切片数量
 
@@ -61,50 +70,56 @@ export default function Home() {
           result[i] = event.data;
           worker.terminate();
           if (++finishThreadCount === threadCount) resolve(result.flat());
+          console.log(
+            "finishThreadCount",
+            finishThreadCount,
+            navigator.hardwareConcurrency
+          );
         };
         worker.onerror = reject;
       }
     });
   }
 
-  function uploadFile({
-    chunk,
-    chunksTotal,
+  async function uploadFile({
+    fileChunk,
     index,
     fileHash,
     chunksHash,
     fileName,
   }: {
-    chunk: Blob; // 切片
-    chunksTotal: number; // 总切片数量
+    fileChunk: Blob; // 文件片段
     index: number; // 切片索引
     chunksHash: string[]; // 切片hash
-    fileHash: string; // 文件hash
+    fileHash: string; // 整个文件hash
     fileName: string; // 文件名
   }) {
-    const xhr = new XMLHttpRequest();
+    const percentComplete = (1 / chunksHash.length) * 100;
     const formData = new FormData();
-    formData.set("fileName", fileName);
-    formData.set("chunk", chunk);
-    formData.set("chunkHash", chunksHash[index]);
-    formData.set("index", index + "");
-    formData.set("chunksTotal", chunksTotal + "");
-    formData.set("fileHash", fileHash);
+    formData.append("fileChunk", fileChunk, fileName);
+    formData.append("fileName", fileName);
+    formData.append("chunkHash", chunksHash[index]);
+    formData.append("index", index + "");
+    formData.append("chunksCount", chunksHash.length + "");
+    formData.append("fileHash", fileHash);
 
-    xhr.upload.onprogress = function (event) {
-      if (event.lengthComputable) {
-        const percentComplete = (event.loaded / event.total) * 100;
-      }
-    };
-    xhr.onload = function () {
-      if (xhr.status === 200) {
-        console.log("Upload complete!");
-      } else {
-        console.error("Upload failed.");
-      }
-    };
-    xhr.open("POST", "/upload", true);
-    xhr.send(formData);
+    return fetch("http://localhost:3000/upload", {
+      method: "POST",
+      body: formData,
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        setFileListStatus((preState) => {
+          console.log("preState", preState[fileHash]?.percent, percentComplete);
+          return {
+            ...preState,
+            [fileHash]: {
+              index: preState[fileHash]?.index ?? 0,
+              percent: (preState[fileHash]?.percent ?? 0) + percentComplete,
+            },
+          };
+        });
+      });
   }
 
   return (
@@ -117,8 +132,7 @@ export default function Home() {
           onChange={async (e) => {
             const startTime = performance.now();
             const chunks = createChunks(e.target.files?.[0]!, 10 * 1024 * 1024);
-            console.log("chunks", chunks);
-            const hash = await calculateFileHash(chunks);
+            const hash = await calculateChunksHash(chunks);
             console.log("hash", hash);
             const endTime = performance.now();
             console.log(`Execution time: ${endTime - startTime} milliseconds`);
@@ -131,19 +145,42 @@ export default function Home() {
         <input
           type="file"
           onChange={async (e) => {
-            try {
-              const startTime = performance.now();
-              const hash = await workerCalculateFileHash(e.target.files?.[0]!);
-              console.log("hash", hash);
-              const endTime = performance.now();
-              console.log(
-                `Execution time: ${endTime - startTime} milliseconds`
+            const startTime = performance.now();
+            const file = e.target.files?.[0];
+            if (!file) return;
+            const chunksHash = await workerCalculateHash(file);
+            const fileHash = await workerCalculateHash(chunksHash.toString());
+            console.log("hash", chunksHash, fileHash);
+            const endTime = performance.now();
+            console.log(`Execution time: ${endTime - startTime} milliseconds`);
+            const chunkSize = 5 * 1024 * 1024;
+            // 生成每个分片的请求函数
+            const uploadFiles: (() => Promise<any>)[] = [];
+            for (let i = 0, j = 0; i < file.size; i += chunkSize, j++) {
+              // 利用闭包携带参数
+              const outerFn = (params: any) => () => uploadFile(params);
+              uploadFiles.push(
+                outerFn({
+                  fileName: file.name,
+                  fileChunk: file.slice(i, i + chunkSize),
+                  index: j,
+                  fileHash,
+                  chunksHash,
+                })
               );
-            } catch (error) {
-              console.log("error", error);
             }
+            // 通过并发控制函数发起请求
+            limitConcurrentRequests(uploadFiles, 4, () => {});
           }}
         />
+      </div>
+      <div className="my-2">
+        {Object.keys(fileListStatus)?.map((key) => (
+          <Progress
+            key={key}
+            percent={parseInt(fileListStatus[key].percent.toFixed(0))}
+          />
+        ))}
       </div>
     </div>
   );
