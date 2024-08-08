@@ -148,7 +148,6 @@ export default function Home() {
             const startTime = performance.now();
             const chunks = createChunks(e.target.files?.[0]!, 10 * 1024 * 1024);
             const hash = await calculateChunksHash(chunks);
-            console.log("hash", hash);
             const endTime = performance.now();
             console.log(`Execution time: ${endTime - startTime} milliseconds`);
           }}
@@ -163,12 +162,13 @@ export default function Home() {
             const startTime = performance.now();
             const file = e.target.files?.[0];
             if (!file) return;
+            // 计算分片hash
             const chunksHash = await workerCalculateHash(file, {
               threadCount: THREAD_COUNT_REF.current,
               chunkSize: CHUNK_SIZE,
             });
+            // 计算文件hash
             const fileHash = await workerCalculateHash(chunksHash.toString());
-            console.log("hash", chunksHash, fileHash);
             const endTime = performance.now();
             console.log(`Execution time: ${endTime - startTime} milliseconds`);
             // 生成每个分片的请求函数
