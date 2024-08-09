@@ -2,6 +2,7 @@ type RequestTask = () => Promise<any>;
 export function createRequestManager() {
   let paused = false;
   let pauseResolve: (() => void) | null = null;
+  let canceled = false;
 
   const pause = () => {
     paused = true;
@@ -18,6 +19,10 @@ export function createRequestManager() {
     }
   };
 
+  const cancel = () => {
+    canceled = true;
+  };
+
   const limitConcurrentRequests = async (
     requestTasks: RequestTask[],
     limit = 4,
@@ -27,10 +32,12 @@ export function createRequestManager() {
     const pool = new Set<Promise<any>>();
 
     for (const request of requestTasks) {
+      if (canceled) break;
+
       if (paused) await pause(); // 等待 resume 调用
 
       if (pool.size >= limit) {
-        await Promise.race(pool).catch(() => {});
+        await Promise.race(pool).catch((err) => err);
       }
 
       const promise = requestRetry(request);
@@ -43,10 +50,10 @@ export function createRequestManager() {
 
       promise.then(responseCallback, responseCallback);
     }
-    await Promise.allSettled(promisesQueue).then(callback);
+    return await Promise.allSettled(promisesQueue).then(callback);
   };
 
-  return { limitConcurrentRequests, pause, resume };
+  return { limitConcurrentRequests, pause, resume, cancel };
 }
 
 /**
@@ -78,7 +85,7 @@ export async function limitConcurrentRequests(
     // 无论响应成功还是失败都从并发池中移除
     promise.then(responseCallback, responseCallback);
   }
-  await Promise.allSettled(promisesQueue).then(callback, callback);
+  return await Promise.allSettled(promisesQueue).then(callback, callback);
 }
 
 /**

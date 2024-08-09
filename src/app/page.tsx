@@ -24,10 +24,11 @@ export default function Home() {
       size: number;
     };
   }>({});
-  const { limitConcurrentRequests, pause, resume } = createRequestManager();
+
   const [isPaused, setIsPaused] = useState<{ [key: string]: boolean }>();
   const pauseFn = useRef<{ [key: string]: () => any }>();
   const resumeFn = useRef<{ [key: string]: () => any }>();
+  const cancelFn = useRef<{ [key: string]: () => any }>();
 
   // 线程数量
   const THREAD_COUNT_REF = useRef(0);
@@ -156,6 +157,8 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then(() => {
+        if (!cancelFn.current?.[fileHash + curIndex]) return;
+        
         setFileListStatus((preState) => {
           return {
             ...preState,
@@ -195,6 +198,8 @@ export default function Home() {
             const startTime = performance.now();
             const file = e.target.files?.[0];
             if (!file) return;
+            const { limitConcurrentRequests, pause, resume, cancel } =
+              createRequestManager();
 
             // 计算分片hash
             const chunksHash = await workerCalculateHash(file, {
@@ -222,12 +227,11 @@ export default function Home() {
                 })
               );
             }
+            // 当前选择文件的下标
+            const curIndex = Object.keys(fileListStatus).length;
 
             // 通过并发控制函数发起请求
             limitConcurrentRequests(uploadFiles, 4, () => {});
-
-            // 当前选择文件的下标
-            const curIndex = Object.keys(fileListStatus).length;
 
             pauseFn.current = {
               ...pauseFn.current,
@@ -240,6 +244,13 @@ export default function Home() {
               ...resumeFn.current,
               [fileHash + curIndex]: () => {
                 resume();
+              },
+            };
+
+            cancelFn.current = {
+              ...cancelFn.current,
+              [fileHash + curIndex]: () => {
+                cancel();
               },
             };
           }}
@@ -268,6 +279,20 @@ export default function Home() {
                 }}
               >
                 {isPaused?.[key] ? "开始" : "暂停"}
+              </span>
+              <span
+                className="ml-2 whitespace-nowrap border px-1 cursor-pointer"
+                onClick={() => {
+                  cancelFn.current?.[key]();
+                  delete cancelFn.current?.[key];
+                  setFileListStatus((prevState) => {
+                    const newState = { ...prevState };
+                    delete newState[key];
+                    return newState;
+                  });
+                }}
+              >
+                取消
               </span>
             </div>
           </div>
