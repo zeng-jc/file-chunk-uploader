@@ -1,3 +1,54 @@
+type RequestTask = () => Promise<any>;
+export function createRequestManager() {
+  let paused = false;
+  let pauseResolve: (() => void) | null = null;
+
+  const pause = () => {
+    paused = true;
+    return new Promise<void>((resolve) => {
+      pauseResolve = resolve;
+    });
+  };
+
+  const resume = () => {
+    paused = false;
+    if (pauseResolve) {
+      pauseResolve();
+      pauseResolve = null;
+    }
+  };
+
+  const limitConcurrentRequests = async (
+    requestTasks: RequestTask[],
+    limit = 4,
+    callback: () => void
+  ) => {
+    const promisesQueue: Promise<any>[] = [];
+    const pool = new Set<Promise<any>>();
+
+    for (const request of requestTasks) {
+      if (paused) await pause(); // 等待 resume 调用
+
+      if (pool.size >= limit) {
+        await Promise.race(pool).catch(() => {});
+      }
+
+      const promise = requestRetry(request);
+      pool.add(promise);
+      promisesQueue.push(promise);
+
+      const responseCallback = () => {
+        pool.delete(promise);
+      };
+
+      promise.then(responseCallback, responseCallback);
+    }
+    await Promise.allSettled(promisesQueue).then(callback);
+  };
+
+  return { limitConcurrentRequests, pause, resume };
+}
+
 /**
  * 并发请求控制函数
  * @param requestTasks 请求任务
@@ -27,7 +78,7 @@ export async function limitConcurrentRequests(
     // 无论响应成功还是失败都从并发池中移除
     promise.then(responseCallback, responseCallback);
   }
-  Promise.allSettled(promisesQueue).then(callback, callback);
+  await Promise.allSettled(promisesQueue).then(callback, callback);
 }
 
 /**

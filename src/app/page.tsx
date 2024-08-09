@@ -3,13 +3,31 @@ import SparkMD5 from "spark-md5";
 import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
 import { useEffect, useRef, useState } from "react";
-import { limitConcurrentRequests } from "@/utils";
+import { createRequestManager } from "@/utils";
 import TestWorker from "../workers/test.worker";
+function formatFileSize(size: number) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index++;
+  }
+  return `${size.toFixed(2)} ${units[index]}`;
+}
 
 export default function Home() {
   const [fileListStatus, setFileListStatus] = useState<{
-    [key: string]: { index: number; percent: number };
+    [key: string]: {
+      index: number;
+      percent: number;
+      fileName: string;
+      size: number;
+    };
   }>({});
+  const { limitConcurrentRequests, pause, resume } = createRequestManager();
+  const [isPaused, setIsPaused] = useState<{ [key: string]: boolean }>();
+  const pauseFn = useRef<{ [key: string]: () => any }>();
+  const resumeFn = useRef<{ [key: string]: () => any }>();
 
   // 线程数量
   const THREAD_COUNT_REF = useRef(0);
@@ -73,29 +91,32 @@ export default function Home() {
       }
 
       const { chunkSize, threadCount } = options;
-      let finishThreadCount = 0;
       const result: string[] = [];
       const chunksCount = Math.ceil(file.size / chunkSize); // 切片总数
       const threadChunkCount = Math.ceil(chunksCount / threadCount); // 线程的切片数量
       const createWorkerCount =
         chunksCount < threadCount ? chunksCount : threadCount;
-      console.log(createWorkerCount);
+      let finishThreadCount = 0;
+
       for (let i = 0; i < createWorkerCount; i++) {
         const worker = new FileWorker();
         const start = i * threadChunkCount;
         let end = (i + 1) * threadChunkCount;
         if (end > chunksCount) end = chunksCount;
+
         worker.postMessage({
           file,
           start,
           end,
           chunkSize,
         });
+
         worker.onmessage = (event) => {
           result[i] = event.data;
           worker.terminate();
           if (++finishThreadCount === createWorkerCount) resolve(result.flat());
         };
+
         worker.onerror = reject;
       }
     });
@@ -107,14 +128,17 @@ export default function Home() {
     fileHash,
     chunksHash,
     fileName,
+    fileSize,
   }: {
     fileChunk: Blob; // 文件片段
     index: number; // 切片索引
     chunksHash: string[]; // 切片hash
     fileHash: string; // 整个文件hash
     fileName: string; // 文件名
+    fileSize: number; // 文件大小
   }) {
     const percentComplete = (1 / chunksHash.length) * 100;
+
     const formData = new FormData();
     formData.append("fileChunk", fileChunk, fileName);
     formData.append("fileName", fileName);
@@ -129,20 +153,24 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then((data) => {
-        setFileListStatus((preState) => ({
-          ...preState,
-          [fileHash]: {
-            index: preState[fileHash]?.index ?? 0,
-            percent: (preState[fileHash]?.percent ?? 0) + percentComplete,
-          },
-        }));
+        setFileListStatus((preState) => {
+          return {
+            ...preState,
+            [fileHash]: {
+              index,
+              fileName,
+              size: fileSize,
+              percent: (preState[fileHash]?.percent ?? 0) + percentComplete,
+            },
+          };
+        });
       });
   }
 
   return (
     <div className="mt-40 w-fit m-auto">
       <BallMoveAnimation />
-      <div>
+      <div className="mb-2">
         主线程：
         <input
           type="file"
@@ -155,8 +183,7 @@ export default function Home() {
           }}
         />
       </div>
-      <br />
-      <div>
+      <div className="mb-8">
         worker：
         <input
           type="file"
@@ -164,41 +191,79 @@ export default function Home() {
             const startTime = performance.now();
             const file = e.target.files?.[0];
             if (!file) return;
+
             // 计算分片hash
             const chunksHash = await workerCalculateHash(file, {
               threadCount: THREAD_COUNT_REF.current,
               chunkSize: CHUNK_SIZE,
             });
+
             // 计算文件hash
             const fileHash = await workerCalculateHash(chunksHash.toString());
             const endTime = performance.now();
             console.log(`Execution time: ${endTime - startTime} milliseconds`);
+
             // 生成每个分片的请求函数
             const uploadFiles: (() => Promise<any>)[] = [];
             for (let i = 0, j = 0; i < file.size; i += CHUNK_SIZE, j++) {
-              // 利用闭包携带参数
-              const outerFn = (params: any) => () => uploadFile(params);
+              const outerFn = (params: any) => () => uploadFile(params); // 利用闭包携带参数
               uploadFiles.push(
                 outerFn({
                   fileName: file.name,
                   fileChunk: file.slice(i, i + CHUNK_SIZE),
                   index: j,
+                  fileSize: file.size,
                   fileHash,
                   chunksHash,
                 })
               );
             }
+
             // 通过并发控制函数发起请求
             limitConcurrentRequests(uploadFiles, 4, () => {});
+
+            pauseFn.current = {
+              ...pauseFn.current,
+              [fileHash]: async () => {
+                await pause();
+              },
+            };
+
+            resumeFn.current = {
+              ...resumeFn.current,
+              [fileHash]: () => {
+                resume();
+              },
+            };
           }}
         />
       </div>
       <div className="my-2">
         {Object.keys(fileListStatus)?.map((key) => (
-          <Progress
-            key={key}
-            percent={parseInt(fileListStatus[key].percent.toFixed(0))}
-          />
+          <div key={key} className="mt-2">
+            <div> {`文件名：${fileListStatus[key].fileName}`}</div>
+            <div>{`文件大小：${formatFileSize(fileListStatus[key].size)}`}</div>
+            <div className="flex">
+              <Progress
+                className="w-[100%]"
+                percent={Math.ceil(fileListStatus[key].percent)}
+              />
+              <span
+                className="ml-2 whitespace-nowrap border px-1 cursor-pointer"
+                onClick={async () => {
+                  isPaused?.[key]
+                    ? resumeFn.current?.[key]()
+                    : pauseFn.current?.[key]();
+                  setIsPaused((preState) => ({
+                    ...preState,
+                    [key]: !preState?.[key],
+                  }));
+                }}
+              >
+                {isPaused?.[key] ? "开始" : "暂停"}
+              </span>
+            </div>
+          </div>
         ))}
       </div>
     </div>
