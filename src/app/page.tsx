@@ -147,20 +147,24 @@ export default function Home() {
     formData.append("chunksCount", chunksHash.length + "");
     formData.append("fileHash", fileHash);
 
+    // 当前选择文件的下标
+    const curIndex = Object.keys(fileListStatus).length;
+
     return fetch("http://localhost:3000/upload", {
       method: "POST",
       body: formData,
     })
       .then((res) => res.json())
-      .then((data) => {
+      .then(() => {
         setFileListStatus((preState) => {
           return {
             ...preState,
-            [fileHash]: {
-              index,
+            [fileHash + curIndex]: {
+              index: curIndex,
               fileName,
               size: fileSize,
-              percent: (preState[fileHash]?.percent ?? 0) + percentComplete,
+              percent:
+                (preState[fileHash + curIndex]?.percent ?? 0) + percentComplete,
             },
           };
         });
@@ -222,16 +226,19 @@ export default function Home() {
             // 通过并发控制函数发起请求
             limitConcurrentRequests(uploadFiles, 4, () => {});
 
+            // 当前选择文件的下标
+            const curIndex = Object.keys(fileListStatus).length;
+
             pauseFn.current = {
               ...pauseFn.current,
-              [fileHash]: async () => {
+              [fileHash + curIndex]: async () => {
                 await pause();
               },
             };
 
             resumeFn.current = {
               ...resumeFn.current,
-              [fileHash]: () => {
+              [fileHash + curIndex]: () => {
                 resume();
               },
             };
