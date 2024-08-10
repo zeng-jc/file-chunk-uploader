@@ -5,6 +5,7 @@ import Progress from "./components/progress";
 import { useEffect, useRef, useState } from "react";
 import { createRequestManager } from "@/utils";
 import TestWorker from "../workers/test.worker";
+import Loading from "./components/Loading/Index";
 function formatFileSize(size: number) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let index = 0;
@@ -24,7 +25,7 @@ export default function Home() {
       size: number;
     };
   }>({});
-
+  const [loading, setLoading] = useState(false);
   const [isPaused, setIsPaused] = useState<{ [key: string]: boolean }>();
   const pauseFn = useRef<{ [key: string]: () => any }>();
   const resumeFn = useRef<{ [key: string]: () => any }>();
@@ -158,7 +159,7 @@ export default function Home() {
       .then((res) => res.json())
       .then(() => {
         if (!cancelFn.current?.[fileHash + curIndex]) return;
-        
+
         setFileListStatus((preState) => {
           return {
             ...preState,
@@ -176,6 +177,7 @@ export default function Home() {
 
   return (
     <div className="mt-40 w-fit m-auto">
+      {loading && <Loading />}
       <BallMoveAnimation />
       <div className="mb-2">
         主线程：
@@ -198,6 +200,9 @@ export default function Home() {
             const startTime = performance.now();
             const file = e.target.files?.[0];
             if (!file) return;
+
+            setLoading(true);
+
             const { limitConcurrentRequests, pause, resume, cancel } =
               createRequestManager();
 
@@ -209,6 +214,9 @@ export default function Home() {
 
             // 计算文件hash
             const fileHash = await workerCalculateHash(chunksHash.toString());
+
+            setLoading(false);
+
             const endTime = performance.now();
             console.log(`Execution time: ${endTime - startTime} milliseconds`);
 
@@ -231,7 +239,7 @@ export default function Home() {
             const curIndex = Object.keys(fileListStatus).length;
 
             // 通过并发控制函数发起请求
-            limitConcurrentRequests(uploadFiles, 4, () => {});
+            limitConcurrentRequests(uploadFiles, 2, () => {});
 
             pauseFn.current = {
               ...pauseFn.current,
