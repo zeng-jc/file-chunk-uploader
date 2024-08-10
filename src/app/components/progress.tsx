@@ -10,7 +10,7 @@ export const Progress: React.FC<{
           style={{ width: Number(percent) + "%" }}
         ></div>
       </div>
-      <span>{percent}%</span>
+      <span className="w-14">{percent}%</span>
     </div>
   );
 };
