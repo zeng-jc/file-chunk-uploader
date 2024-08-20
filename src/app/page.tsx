@@ -95,9 +95,12 @@ export default function Home() {
       const { chunkSize, threadCount } = options;
       const result: string[] = [];
       const chunksCount = Math.ceil(file.size / chunkSize); // 切片总数
-      const threadChunkCount = Math.ceil(chunksCount / threadCount); // 线程的切片数量
+      const threadChunkCount = Math.ceil(chunksCount / threadCount); // 线程分配到的切片数量
+
+      // 切片数量小于线程数量，用切片数量来创建worker
       const createWorkerCount =
         chunksCount < threadCount ? chunksCount : threadCount;
+
       let finishThreadCount = 0;
 
       for (let i = 0; i < createWorkerCount; i++) {
@@ -108,8 +111,8 @@ export default function Home() {
 
         worker.postMessage({
           file,
-          start,
-          end,
+          start: start * chunkSize,
+          end: end * chunkSize,
           chunkSize,
         });
 
@@ -123,7 +126,6 @@ export default function Home() {
       }
     });
   }
-
   async function uploadFile({
     fileChunk,
     index,

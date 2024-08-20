@@ -50,7 +50,7 @@ export function createRequestManager() {
 
       promise.then(responseCallback, responseCallback);
     }
-    return await Promise.allSettled(promisesQueue).then(callback);
+    return await Promise.allSettled(promisesQueue).then(callback, callback);
   };
 
   return { limitConcurrentRequests, pause, resume, cancel };
