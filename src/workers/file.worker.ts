@@ -34,7 +34,7 @@ function createChunks({
   const chunks: Blob[] = [];
   for (let i = start; i < end; i += chunkSize) {
     const blob = file.slice(i, i + chunkSize);
-    if (blob.size === 0) return [];
+    if (blob.size === 0) continue;
     chunks.push(blob);
   }
   return chunks;
