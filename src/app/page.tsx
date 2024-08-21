@@ -3,18 +3,19 @@ import SparkMD5 from "spark-md5";
 import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
 import { useEffect, useRef, useState } from "react";
-import { createRequestManager } from "@/utils";
+import { RequestTask, createRequestManager, formatFileSize } from "@/utils";
 import TestWorker from "../workers/test.worker";
 import Loading from "./components/Loading/Index";
-function formatFileSize(size: number) {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let index = 0;
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024;
-    index++;
-  }
-  return `${size.toFixed(2)} ${units[index]}`;
+
+interface ChunkUploadParams {
+  fileChunk: Blob; // 文件片段
+  index: number; // 切片索引
+  chunksHash: string[]; // 切片hash
+  fileHash: string; // 整个文件hash
+  fileName: string; // 文件名
+  fileSize: number; // 文件大小
 }
+type ChunkCheckParams = Omit<ChunkUploadParams, "fileChunk">;
 
 export default function Home() {
   const [fileListStatus, setFileListStatus] = useState<{
@@ -45,25 +46,6 @@ export default function Home() {
       };
     }
   }, []);
-
-  // 文件切片
-  function createChunks(file: File, chunkSize = 10 * 1024 * 1024) {
-    const chunks: Blob[] = [];
-    for (let i = 0; i < file.size; i += chunkSize) {
-      chunks.push(file.slice(i, i + chunkSize));
-    }
-    return chunks;
-  }
-
-  // 计算文件切片的hash
-  async function calculateChunksHash(chunks: Blob[]) {
-    return Promise.all(
-      chunks.map(async (chunk) => {
-        const bytes = await chunk.arrayBuffer();
-        return SparkMD5.ArrayBuffer.hash(bytes);
-      })
-    );
-  }
 
   // 交给worker计算hash值
   async function workerCalculateHash(
@@ -126,6 +108,57 @@ export default function Home() {
       }
     });
   }
+
+  async function checkChunk({
+    index,
+    fileHash,
+    chunksHash,
+    fileName,
+    fileSize,
+  }: ChunkCheckParams) {
+    const percentComplete = (1 / chunksHash.length) * 100;
+
+    // 当前选择文件的下标
+    const curIndex = Object.keys(fileListStatus).length;
+
+    return fetch("http://localhost:3000/upload/check", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        index,
+        chunkHash: chunksHash[index],
+        fileName,
+        fileHash,
+      }),
+    })
+      .then((res) => res.json())
+      .then((res) => {
+        // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态bug）
+        if (!cancelFn.current?.[fileHash + curIndex]) return;
+
+        // 当res.data为true的时候更新进度条，这里返回值需要和后端协商
+        if (res.data) {
+          // 更新进度条
+          setFileListStatus((preState) => {
+            return {
+              ...preState,
+              [fileHash + curIndex]: {
+                index: curIndex,
+                fileName,
+                size: fileSize,
+                percent:
+                  (preState[fileHash + curIndex]?.percent ?? 0) +
+                  percentComplete,
+              },
+            };
+          });
+          return true;
+        }
+      });
+  }
+
   async function uploadFile({
     fileChunk,
     index,
@@ -133,14 +166,7 @@ export default function Home() {
     chunksHash,
     fileName,
     fileSize,
-  }: {
-    fileChunk: Blob; // 文件片段
-    index: number; // 切片索引
-    chunksHash: string[]; // 切片hash
-    fileHash: string; // 整个文件hash
-    fileName: string; // 文件名
-    fileSize: number; // 文件大小
-  }) {
+  }: ChunkUploadParams) {
     const percentComplete = (1 / chunksHash.length) * 100;
 
     const formData = new FormData();
@@ -160,8 +186,10 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then(() => {
+        // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态bug）
         if (!cancelFn.current?.[fileHash + curIndex]) return;
 
+        // 更新进度条
         setFileListStatus((preState) => {
           return {
             ...preState,
@@ -181,19 +209,6 @@ export default function Home() {
     <div className="mt-40 w-fit m-auto">
       {loading && <Loading />}
       <BallMoveAnimation />
-      <div className="mb-2">
-        主线程：
-        <input
-          type="file"
-          onChange={async (e) => {
-            const startTime = performance.now();
-            const chunks = createChunks(e.target.files?.[0]!, 10 * 1024 * 1024);
-            const hash = await calculateChunksHash(chunks);
-            const endTime = performance.now();
-            console.log(`Execution time: ${endTime - startTime} milliseconds`);
-          }}
-        />
-      </div>
       <div className="mb-8">
         worker：
         <input
@@ -217,31 +232,45 @@ export default function Home() {
             // 计算文件hash
             const fileHash = await workerCalculateHash(chunksHash.toString());
 
-            setLoading(false);
-
             const endTime = performance.now();
             console.log(`Execution time: ${endTime - startTime} milliseconds`);
 
             // 生成每个分片的请求函数
-            const uploadFiles: (() => Promise<any>)[] = [];
+            const chunkUpload: RequestTask = [];
+
             for (let i = 0, j = 0; i < file.size; i += CHUNK_SIZE, j++) {
-              const outerFn = (params: any) => () => uploadFile(params); // 利用闭包携带参数
-              uploadFiles.push(
-                outerFn({
+              const outerCheckChunkFn = (params: ChunkCheckParams) => () =>
+                checkChunk(params);
+
+              const outerUploadChunkFn = (params: ChunkUploadParams) => () =>
+                uploadFile(params);
+
+              chunkUpload.push([
+                outerCheckChunkFn({
+                  fileName: file.name,
+                  index: j,
+                  fileHash,
+                  chunksHash,
+                  fileSize: file.size,
+                }),
+                outerUploadChunkFn({
                   fileName: file.name,
                   fileChunk: file.slice(i, i + CHUNK_SIZE),
                   index: j,
                   fileSize: file.size,
                   fileHash,
                   chunksHash,
-                })
-              );
+                }),
+              ]);
             }
+
             // 当前选择文件的下标
             const curIndex = Object.keys(fileListStatus).length;
 
+            setLoading(false);
+
             // 通过并发控制函数发起请求
-            limitConcurrentRequests(uploadFiles, 2, () => {});
+            limitConcurrentRequests(chunkUpload, 2, () => {});
 
             pauseFn.current = {
               ...pauseFn.current,

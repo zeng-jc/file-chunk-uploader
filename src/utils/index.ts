@@ -1,4 +1,5 @@
-type RequestTask = () => Promise<any>;
+export type RequestTask = [() => Promise<any>, () => Promise<any>][];
+
 export function createRequestManager() {
   let paused = false;
   let pauseResolve: (() => void) | null = null;
@@ -24,14 +25,14 @@ export function createRequestManager() {
   };
 
   const limitConcurrentRequests = async (
-    requestTasks: RequestTask[],
+    requestTasks: RequestTask,
     limit = 4,
     callback: () => void
   ) => {
     const promisesQueue: Promise<any>[] = [];
     const pool = new Set<Promise<any>>();
 
-    for (const request of requestTasks) {
+    for (const [checkRequest, uploadRequest] of requestTasks) {
       if (canceled) break;
 
       if (paused) await pause(); // 等待 resume 调用
@@ -40,7 +41,10 @@ export function createRequestManager() {
         await Promise.race(pool).catch((err) => err);
       }
 
-      const promise = requestRetry(request);
+      const promise = requestRetry(checkRequest).then((res) => {
+        if (res) return res;
+        return requestRetry(uploadRequest);
+      });
       pool.add(promise);
       promisesQueue.push(promise);
 
@@ -63,7 +67,7 @@ export function createRequestManager() {
  * @param callback 请求任务全部完成调用
  */
 export async function limitConcurrentRequests(
-  requestTasks: (() => Promise<any>)[],
+  requestTasks: RequestTask,
   limit = 4,
   callback: () => void
 ) {
@@ -72,11 +76,14 @@ export async function limitConcurrentRequests(
   // 当前并发池
   const pool = new Set();
   // 开始并发执行所有的任务
-  for (let request of requestTasks) {
+  for (const [checkRequest, uploadRequest] of requestTasks) {
     if (pool.size >= limit) {
       await Promise.race(pool).catch((err) => err);
     }
-    const promise = requestRetry(request);
+    const promise = requestRetry(checkRequest).then((res) => {
+      if (res) return res;
+      return requestRetry(uploadRequest);
+    });
     pool.add(promise);
     promisesQueue.push(promise);
     const responseCallback = () => {
@@ -103,4 +110,14 @@ export async function requestRetry(
       ? Promise.reject(err)
       : requestRetry(request, retryCount - 1)
   );
+}
+
+export function formatFileSize(size: number) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index++;
+  }
+  return `${size.toFixed(2)} ${units[index]}`;
 }
