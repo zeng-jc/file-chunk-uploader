@@ -1,5 +1,4 @@
 "use client";
-import SparkMD5 from "spark-md5";
 import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
 import {
@@ -322,7 +321,7 @@ export default function Home() {
   return (
     <div className="mt-40 w-fit m-auto">
       {loading && <Loading />}
-      {/* <BallMoveAnimation /> */}
+      <BallMoveAnimation />
       <div className="mb-8">
         worker：
         <input type="file" onChange={selectFileHandle} />
