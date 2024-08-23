@@ -2,12 +2,18 @@
 import SparkMD5 from "spark-md5";
 import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
-import { useEffect, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  ChangeEventHandler,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { RequestTask, createRequestManager, formatFileSize } from "@/utils";
 import TestWorker from "../workers/test.worker";
 import Loading from "./components/Loading/Index";
 
-interface ChunkUploadParams {
+interface ChunkUploadFnParams {
   fileChunk: Blob; // 文件片段
   index: number; // 切片索引
   chunksHash: string[]; // 切片hash
@@ -15,9 +21,74 @@ interface ChunkUploadParams {
   fileName: string; // 文件名
   fileSize: number; // 文件大小
 }
-type ChunkCheckParams = Omit<ChunkUploadParams, "fileChunk">;
+
+type ChunkCheckFnParams = Omit<ChunkUploadFnParams, "fileChunk">;
+
+// 交给worker计算hash值
+async function workerCalculateHash(file: string): Promise<string>;
+async function workerCalculateHash(
+  file: File,
+  options: {
+    chunkSize: number;
+    threadCount: number;
+  }
+): Promise<string[]>;
+async function workerCalculateHash(
+  file: File | string,
+  options?: {
+    chunkSize: number;
+    threadCount: number;
+  }
+): Promise<string[] | string> {
+  const { default: FileWorker } = await import("../workers/file.worker");
+  return new Promise((resolve, reject) => {
+    if (typeof file === "string" || !options) {
+      const worker = new FileWorker();
+      worker.postMessage({ file });
+      return (worker.onmessage = (event) => {
+        resolve(event.data as string);
+        worker.terminate();
+      });
+    }
+
+    const { chunkSize, threadCount } = options;
+    const result: string[] = [];
+    const chunksCount = Math.ceil(file.size / chunkSize); // 切片总数
+    const threadChunkCount = Math.ceil(chunksCount / threadCount); // 线程分配到的切片数量
+
+    // 切片数量小于线程数量，用切片数量来创建worker
+    const createWorkerCount =
+      chunksCount < threadCount ? chunksCount : threadCount;
+
+    let finishThreadCount = 0;
+
+    for (let i = 0; i < createWorkerCount; i++) {
+      const worker = new FileWorker();
+      const start = i * threadChunkCount;
+      let end = (i + 1) * threadChunkCount;
+      if (end > chunksCount) end = chunksCount;
+
+      worker.postMessage({
+        file,
+        start: start * chunkSize,
+        end: end * chunkSize,
+        chunkSize,
+      });
+
+      worker.onmessage = (event) => {
+        result[i] = event.data;
+        worker.terminate();
+        if (++finishThreadCount === createWorkerCount) resolve(result.flat());
+      };
+
+      worker.onerror = reject;
+    }
+  });
+}
 
 export default function Home() {
+  const [loading, setLoading] = useState(false);
+  // key = hash + index
   const [fileListStatus, setFileListStatus] = useState<{
     [key: string]: {
       index: number;
@@ -26,7 +97,6 @@ export default function Home() {
       size: number;
     };
   }>({});
-  const [loading, setLoading] = useState(false);
   const [isPaused, setIsPaused] = useState<{ [key: string]: boolean }>();
   const pauseFn = useRef<{ [key: string]: () => any }>();
   const resumeFn = useRef<{ [key: string]: () => any }>();
@@ -35,6 +105,7 @@ export default function Home() {
   // 线程数量
   const THREAD_COUNT_REF = useRef(0);
   const CHUNK_SIZE = 5 * 1024 * 1024;
+
   useEffect(() => {
     const threadCount = navigator.hardwareConcurrency || 4;
     for (let i = 0; i < threadCount; i++) {
@@ -47,81 +118,19 @@ export default function Home() {
     }
   }, []);
 
-  // 交给worker计算hash值
-  async function workerCalculateHash(
-    file: File,
-    options: {
-      chunkSize: number;
-      threadCount: number;
-    }
-  ): Promise<string[]>;
-  async function workerCalculateHash(file: string): Promise<string>;
-  async function workerCalculateHash(
-    file: File | string,
-    options?: {
-      chunkSize: number;
-      threadCount: number;
-    }
-  ): Promise<string[] | string> {
-    const { default: FileWorker } = await import("../workers/file.worker");
-    return new Promise((resolve, reject) => {
-      if (typeof file === "string" || !options) {
-        const worker = new FileWorker();
-        worker.postMessage({ file });
-        return (worker.onmessage = (event) => {
-          resolve(event.data as string);
-          worker.terminate();
-        });
-      }
-
-      const { chunkSize, threadCount } = options;
-      const result: string[] = [];
-      const chunksCount = Math.ceil(file.size / chunkSize); // 切片总数
-      const threadChunkCount = Math.ceil(chunksCount / threadCount); // 线程分配到的切片数量
-
-      // 切片数量小于线程数量，用切片数量来创建worker
-      const createWorkerCount =
-        chunksCount < threadCount ? chunksCount : threadCount;
-
-      let finishThreadCount = 0;
-
-      for (let i = 0; i < createWorkerCount; i++) {
-        const worker = new FileWorker();
-        const start = i * threadChunkCount;
-        let end = (i + 1) * threadChunkCount;
-        if (end > chunksCount) end = chunksCount;
-
-        worker.postMessage({
-          file,
-          start: start * chunkSize,
-          end: end * chunkSize,
-          chunkSize,
-        });
-
-        worker.onmessage = (event) => {
-          result[i] = event.data;
-          worker.terminate();
-          if (++finishThreadCount === createWorkerCount) resolve(result.flat());
-        };
-
-        worker.onerror = reject;
-      }
-    });
-  }
-
   async function checkChunk({
     index,
     fileHash,
     chunksHash,
     fileName,
     fileSize,
-  }: ChunkCheckParams) {
+  }: ChunkCheckFnParams) {
     const percentComplete = (1 / chunksHash.length) * 100;
 
     // 当前选择文件的下标
     const curIndex = Object.keys(fileListStatus).length;
 
-    return fetch("http://localhost:3000/upload/check", {
+    return await fetch("http://localhost:3000/upload/check", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -154,7 +163,7 @@ export default function Home() {
               },
             };
           });
-          return true;
+          return res.data;
         }
       });
   }
@@ -166,7 +175,7 @@ export default function Home() {
     chunksHash,
     fileName,
     fileSize,
-  }: ChunkUploadParams) {
+  }: ChunkUploadFnParams) {
     const percentComplete = (1 / chunksHash.length) * 100;
 
     const formData = new FormData();
@@ -202,98 +211,121 @@ export default function Home() {
             },
           };
         });
+        return fileHash + "-" + index;
       });
   }
+
+  const selectFileHandle = async (e: ChangeEvent<HTMLInputElement>) => {
+    const startTime = performance.now();
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setLoading(true);
+
+    const { limitConcurrentRequests, pause, resume, cancel } =
+      createRequestManager();
+
+    // 计算分片hash
+    const chunksHash = await workerCalculateHash(file, {
+      threadCount: THREAD_COUNT_REF.current,
+      chunkSize: CHUNK_SIZE,
+    });
+
+    // 计算文件hash
+    const fileHash = await workerCalculateHash(chunksHash.toString());
+
+    const endTime = performance.now();
+    console.log(`Execution time: ${endTime - startTime} milliseconds`);
+
+    // 生成每个分片的请求函数
+    const chunkUpload: RequestTask = [];
+
+    for (let i = 0, j = 0; i < file.size; i += CHUNK_SIZE, j++) {
+      const outerCheckChunkFn = (params: ChunkCheckFnParams) => () =>
+        checkChunk(params);
+
+      const outerUploadChunkFn = (params: ChunkUploadFnParams) => () =>
+        uploadFile(params);
+
+      chunkUpload.push([
+        outerCheckChunkFn({
+          fileName: file.name,
+          index: j,
+          fileHash,
+          chunksHash,
+          fileSize: file.size,
+        }),
+        outerUploadChunkFn({
+          fileName: file.name,
+          fileChunk: file.slice(i, i + CHUNK_SIZE),
+          index: j,
+          fileSize: file.size,
+          fileHash,
+          chunksHash,
+        }),
+      ]);
+    }
+
+    // 当前选择文件的下标
+    const curIndex = Object.keys(fileListStatus).length;
+
+    setLoading(false);
+
+    const KEY = fileHash + curIndex;
+
+    // 通过并发控制函数发起请求
+    limitConcurrentRequests(chunkUpload, 2, {
+      onPaused: () => {
+        console.log("onPaused");
+        setIsPaused((preState) => ({
+          ...preState,
+          [KEY]: true,
+        }));
+      },
+      onResumed: () => {
+        console.log("onResumed");
+        setIsPaused((preState) => ({
+          ...preState,
+          [KEY]: false,
+        }));
+      },
+      onCanceled: () => {
+        console.log("onCanceled");
+      },
+      onCompleted: (res) => {
+        console.log("res", res);
+      },
+    });
+
+    pauseFn.current = {
+      ...pauseFn.current,
+      [KEY]: () => {
+        pause();
+      },
+    };
+
+    resumeFn.current = {
+      ...resumeFn.current,
+      [KEY]: () => {
+        resume();
+      },
+    };
+
+    cancelFn.current = {
+      ...cancelFn.current,
+      [KEY]: () => {
+        cancel();
+      },
+    };
+  };
 
   return (
     <div className="mt-40 w-fit m-auto">
       {loading && <Loading />}
-      <BallMoveAnimation />
+      {/* <BallMoveAnimation /> */}
       <div className="mb-8">
         worker：
-        <input
-          type="file"
-          onChange={async (e) => {
-            const startTime = performance.now();
-            const file = e.target.files?.[0];
-            if (!file) return;
-
-            setLoading(true);
-
-            const { limitConcurrentRequests, pause, resume, cancel } =
-              createRequestManager();
-
-            // 计算分片hash
-            const chunksHash = await workerCalculateHash(file, {
-              threadCount: THREAD_COUNT_REF.current,
-              chunkSize: CHUNK_SIZE,
-            });
-
-            // 计算文件hash
-            const fileHash = await workerCalculateHash(chunksHash.toString());
-
-            const endTime = performance.now();
-            console.log(`Execution time: ${endTime - startTime} milliseconds`);
-
-            // 生成每个分片的请求函数
-            const chunkUpload: RequestTask = [];
-
-            for (let i = 0, j = 0; i < file.size; i += CHUNK_SIZE, j++) {
-              const outerCheckChunkFn = (params: ChunkCheckParams) => () =>
-                checkChunk(params);
-
-              const outerUploadChunkFn = (params: ChunkUploadParams) => () =>
-                uploadFile(params);
-
-              chunkUpload.push([
-                outerCheckChunkFn({
-                  fileName: file.name,
-                  index: j,
-                  fileHash,
-                  chunksHash,
-                  fileSize: file.size,
-                }),
-                outerUploadChunkFn({
-                  fileName: file.name,
-                  fileChunk: file.slice(i, i + CHUNK_SIZE),
-                  index: j,
-                  fileSize: file.size,
-                  fileHash,
-                  chunksHash,
-                }),
-              ]);
-            }
-
-            // 当前选择文件的下标
-            const curIndex = Object.keys(fileListStatus).length;
-
-            setLoading(false);
-
-            // 通过并发控制函数发起请求
-            limitConcurrentRequests(chunkUpload, 2, () => {});
-
-            pauseFn.current = {
-              ...pauseFn.current,
-              [fileHash + curIndex]: async () => {
-                await pause();
-              },
-            };
-
-            resumeFn.current = {
-              ...resumeFn.current,
-              [fileHash + curIndex]: () => {
-                resume();
-              },
-            };
-
-            cancelFn.current = {
-              ...cancelFn.current,
-              [fileHash + curIndex]: () => {
-                cancel();
-              },
-            };
-          }}
-        />
+        <input type="file" onChange={selectFileHandle} />
       </div>
       <div className="my-2">
         {Object.keys(fileListStatus)?.map((key) => (
@@ -311,10 +343,6 @@ export default function Home() {
                   isPaused?.[key]
                     ? resumeFn.current?.[key]()
                     : pauseFn.current?.[key]();
-                  setIsPaused((preState) => ({
-                    ...preState,
-                    [key]: !preState?.[key],
-                  }));
                 }}
               >
                 {isPaused?.[key] ? "开始" : "暂停"}
