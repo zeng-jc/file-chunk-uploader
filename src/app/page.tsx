@@ -3,7 +3,6 @@ import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
 import {
   ChangeEvent,
-  ChangeEventHandler,
   useEffect,
   useRef,
   useState,
@@ -167,7 +166,7 @@ export default function Home() {
       });
   }
 
-  async function uploadFile({
+  async function uploadChunk({
     fileChunk,
     index,
     fileHash,
@@ -244,7 +243,7 @@ export default function Home() {
         checkChunk(params);
 
       const outerUploadChunkFn = (params: ChunkUploadFnParams) => () =>
-        uploadFile(params);
+        uploadChunk(params);
 
       chunkUpload.push([
         outerCheckChunkFn({
