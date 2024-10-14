@@ -107,6 +107,33 @@ export function createRequestManager() {
 }
 
 /**
+ *
+ * @param request 请求函数
+ * @param retryCount 重试次数
+ * @returns
+ */
+export async function requestRetry(
+  request: () => Promise<any>,
+  retryCount = 1
+): Promise<any> {
+  return await request().catch((err: any) =>
+    retryCount <= 0
+      ? Promise.reject(err)
+      : requestRetry(request, retryCount - 1)
+  );
+}
+
+export function formatFileSize(size: number) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index++;
+  }
+  return `${size.toFixed(2)} ${units[index]}`;
+}
+
+/**
  * 并发请求控制函数
  * @param requestTasks 请求任务
  * @param limit 并发限制
@@ -139,31 +166,4 @@ export async function limitConcurrentRequests(
     promise.then(responseCallback, responseCallback);
   }
   return await Promise.allSettled(promisesQueue).then(callback, callback);
-}
-
-/**
- *
- * @param request 请求函数
- * @param retryCount 重试次数
- * @returns
- */
-export async function requestRetry(
-  request: () => Promise<any>,
-  retryCount = 1
-): Promise<any> {
-  return await request().catch((err: any) =>
-    retryCount <= 0
-      ? Promise.reject(err)
-      : requestRetry(request, retryCount - 1)
-  );
-}
-
-export function formatFileSize(size: number) {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let index = 0;
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024;
-    index++;
-  }
-  return `${size.toFixed(2)} ${units[index]}`;
 }
