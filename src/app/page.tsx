@@ -1,12 +1,7 @@
 "use client";
 import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
-import {
-  ChangeEvent,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { RequestTask, createRequestManager, formatFileSize } from "@/utils";
 import TestWorker from "../workers/test.worker";
 import Loading from "./components/Loading/Index";
@@ -18,6 +13,7 @@ interface ChunkUploadFnParams {
   fileHash: string; // 整个文件hash
   fileName: string; // 文件名
   fileSize: number; // 文件大小
+  fileType: string; // 文件类型
 }
 
 type ChunkCheckFnParams = Omit<ChunkUploadFnParams, "fileChunk">;
@@ -142,7 +138,7 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then((res) => {
-        // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态bug）
+        // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态问题）
         if (!cancelFn.current?.[fileHash + curIndex]) return;
 
         // 当res.data为true的时候更新进度条，这里返回值需要和后端协商
@@ -173,6 +169,7 @@ export default function Home() {
     chunksHash,
     fileName,
     fileSize,
+    fileType,
   }: ChunkUploadFnParams) {
     const percentComplete = (1 / chunksHash.length) * 100;
 
@@ -180,9 +177,11 @@ export default function Home() {
     formData.append("fileChunk", fileChunk, fileName);
     formData.append("fileName", fileName);
     formData.append("chunkHash", chunksHash[index]);
-    formData.append("index", index + "");
+    formData.append("index", index.toString());
     formData.append("chunksCount", chunksHash.length + "");
     formData.append("fileHash", fileHash);
+    formData.append("fileSize", fileSize.toString());
+    formData.append("fileType", fileType);
 
     // 当前选择文件的下标
     const curIndex = Object.keys(fileListStatus).length;
@@ -193,7 +192,7 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then(() => {
-        // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态bug）
+        // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态问题）
         if (!cancelFn.current?.[fileHash + curIndex]) return;
 
         // 更新进度条
@@ -248,16 +247,18 @@ export default function Home() {
       chunkUpload.push([
         outerCheckChunkFn({
           fileName: file.name,
+          fileSize: file.size,
+          fileType: file.type,
           index: j,
           fileHash,
           chunksHash,
-          fileSize: file.size,
         }),
         outerUploadChunkFn({
           fileName: file.name,
-          fileChunk: file.slice(i, i + CHUNK_SIZE),
-          index: j,
           fileSize: file.size,
+          fileType: file.type,
+          index: j,
+          fileChunk: file.slice(i, i + CHUNK_SIZE),
           fileHash,
           chunksHash,
         }),
@@ -291,7 +292,21 @@ export default function Home() {
         console.log("onCanceled");
       },
       onCompleted: (res) => {
-        console.log("res", res);
+        console.log("onCompleted", res);
+        // 发起合并请求
+        fetch("http://localhost:3000/upload/merge", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            fileHash,
+          }),
+        })
+          .then((res) => res.json())
+          .then(() => {
+            console.log("合并成功");
+          });
       },
     });
 
@@ -328,7 +343,7 @@ export default function Home() {
       <div className="my-2">
         {Object.keys(fileListStatus)?.map((key) => (
           <div key={key} className="mt-2">
-            <div> {`文件名：${fileListStatus[key].fileName}`}</div>
+            <div>{`文件名：${fileListStatus[key].fileName}`}</div>
             <div>{`文件大小：${formatFileSize(fileListStatus[key].size)}`}</div>
             <div className="flex">
               <Progress
