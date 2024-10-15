@@ -89,9 +89,10 @@ export default function Home() {
       percent: number;
       fileName: string;
       size: number;
+      paused: boolean;
     };
   }>({});
-  const [isPaused, setIsPaused] = useState<{ [key: string]: boolean }>();
+  const pausedStatus = useRef<{ [key: string]: boolean }>({});
   const pauseFn = useRef<{ [key: string]: () => any }>();
   const resumeFn = useRef<{ [key: string]: () => any }>();
   const cancelFn = useRef<{ [key: string]: () => any }>();
@@ -138,27 +139,31 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then((res) => {
+        // 根据res.data更新进度条，这里返回值需要和后端协商
+        if (!res.data) return;
+
         // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态问题）
         if (!cancelFn.current?.[fileHash + curIndex]) return;
 
-        // 当res.data为true的时候更新进度条，这里返回值需要和后端协商
-        if (res.data) {
-          // 更新进度条
-          setFileListStatus((preState) => {
-            return {
-              ...preState,
-              [fileHash + curIndex]: {
-                index: curIndex,
-                fileName,
-                size: fileSize,
-                percent:
-                  (preState[fileHash + curIndex]?.percent ?? 0) +
-                  percentComplete,
-              },
-            };
-          });
-          return res.data;
-        }
+        // 暂停：根据res.data决定是否执行uploadChunk
+        if (pausedStatus.current[fileHash + curIndex]) return res.data;
+
+        // 更新进度条
+        setFileListStatus((preState) => {
+          return {
+            ...preState,
+            [fileHash + curIndex]: {
+              index: curIndex,
+              fileName,
+              size: fileSize,
+              percent:
+                (preState[fileHash + curIndex]?.percent ?? 0) + percentComplete,
+              paused: false,
+            },
+          };
+        });
+        // 注意这里必须返回true，createRequestManager内部会根据返回值决定是否执行uploadChunk
+        return true;
       });
   }
 
@@ -191,9 +196,15 @@ export default function Home() {
       body: formData,
     })
       .then((res) => res.json())
-      .then(() => {
+      .then((res) => {
+        // 根据res.data更新进度条，这里返回值需要和后端协商
+        if (!res.data) return;
+
         // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态问题）
         if (!cancelFn.current?.[fileHash + curIndex]) return;
+
+        // 暂停状态，不更新进度条（处理竞态问题）
+        if (pausedStatus.current[fileHash + curIndex]) return;
 
         // 更新进度条
         setFileListStatus((preState) => {
@@ -205,10 +216,10 @@ export default function Home() {
               size: fileSize,
               percent:
                 (preState[fileHash + curIndex]?.percent ?? 0) + percentComplete,
+              paused: false,
             },
           };
         });
-        return fileHash + "-" + index;
       });
   }
 
@@ -276,17 +287,25 @@ export default function Home() {
     limitConcurrentRequests(chunkUpload, 2, {
       onPaused: () => {
         console.log("onPaused");
-        setIsPaused((preState) => ({
+        setFileListStatus((preState) => ({
           ...preState,
-          [KEY]: true,
+          [KEY]: {
+            ...preState[KEY],
+            paused: true,
+          },
         }));
+        pausedStatus.current[KEY] = true;
       },
       onResumed: () => {
         console.log("onResumed");
-        setIsPaused((preState) => ({
+        setFileListStatus((preState) => ({
           ...preState,
-          [KEY]: false,
+          [KEY]: {
+            ...preState[KEY],
+            paused: false,
+          },
         }));
+        pausedStatus.current[KEY] = false;
       },
       onCanceled: () => {
         console.log("onCanceled");
@@ -335,7 +354,7 @@ export default function Home() {
   return (
     <div className="mt-40 w-fit m-auto">
       {loading && <Loading />}
-      <BallMoveAnimation />
+      {/* <BallMoveAnimation /> */}
       <div className="mb-8">
         worker：
         <input type="file" onChange={selectFileHandle} />
@@ -353,12 +372,12 @@ export default function Home() {
               <span
                 className="ml-2 whitespace-nowrap border px-1 cursor-pointer"
                 onClick={async () => {
-                  isPaused?.[key]
+                  fileListStatus[key].paused
                     ? resumeFn.current?.[key]()
                     : pauseFn.current?.[key]();
                 }}
               >
-                {isPaused?.[key] ? "开始" : "暂停"}
+                {fileListStatus[key].paused ? "开始" : "暂停"}
               </span>
               <span
                 className="ml-2 whitespace-nowrap border px-1 cursor-pointer"
