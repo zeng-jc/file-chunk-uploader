@@ -1,7 +1,15 @@
 "use client";
 import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
-import { ChangeEvent, useEffect, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  Dispatch,
+  MutableRefObject,
+  SetStateAction,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { RequestTask, createRequestManager, formatFileSize } from "@/utils";
 import TestWorker from "../workers/test.worker";
 import Loading from "./components/Loading/Index";
@@ -14,9 +22,73 @@ interface ChunkUploadFnParams {
   fileName: string; // 文件名
   fileSize: number; // 文件大小
   fileType: string; // 文件类型
+  chunksPercentComplete: number; // 每个分片所占进度的百分比
 }
 
 type ChunkCheckFnParams = Omit<ChunkUploadFnParams, "fileChunk">;
+
+interface UpdateProgressParams {
+  res: any;
+  key: string; // fileHash + curIndex
+  chunksPercentComplete: number;
+  curIndex: number;
+  fileName: string;
+  fileSize: number;
+  cancelFn: MutableRefObject<{ [key: string]: () => any }>;
+  pausedStatus: MutableRefObject<{ [key: string]: boolean }>;
+  realProgress: MutableRefObject<{ [key: string]: number }>;
+  setFileListStatus: Dispatch<
+    SetStateAction<{
+      [key: string]: {
+        index: number;
+        progress: number;
+        fileName: string;
+        size: number;
+        paused: boolean;
+      };
+    }>
+  >;
+}
+
+const updateProgress = ({
+  res,
+  key,
+  chunksPercentComplete,
+  curIndex,
+  fileName,
+  fileSize,
+  cancelFn,
+  pausedStatus,
+  realProgress,
+  setFileListStatus,
+}: UpdateProgressParams) => {
+  // 根据res.data更新进度条，这里返回值需要和后端协商
+  if (!res.data) return;
+
+  // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态问题）
+  if (!cancelFn.current?.[key]) return;
+
+  realProgress.current[key] ??= 0;
+  realProgress.current[key] += chunksPercentComplete;
+  // 暂停状态，不更新进度条（处理竞态问题）
+  if (pausedStatus.current[key]) return;
+
+  // 更新进度条
+  setFileListStatus((preState) => {
+    return {
+      ...preState,
+      [key]: {
+        index: curIndex,
+        fileName,
+        size: fileSize,
+        progress: realProgress.current[key],
+        paused: false,
+      },
+    };
+  });
+  // 注意这里需要有返回值，createRequestManager内部会根据返回值决定是否执行uploadChunk
+  return res.data;
+};
 
 // 交给worker计算hash值
 async function workerCalculateHash(file: string): Promise<string>;
@@ -86,16 +158,17 @@ export default function Home() {
   const [fileListStatus, setFileListStatus] = useState<{
     [key: string]: {
       index: number;
-      percent: number;
+      progress: number;
       fileName: string;
       size: number;
       paused: boolean;
     };
   }>({});
+  const realProgress = useRef<{ [key: string]: number }>({});
   const pausedStatus = useRef<{ [key: string]: boolean }>({});
-  const pauseFn = useRef<{ [key: string]: () => any }>();
-  const resumeFn = useRef<{ [key: string]: () => any }>();
-  const cancelFn = useRef<{ [key: string]: () => any }>();
+  const pauseFn = useRef<{ [key: string]: () => any }>({});
+  const resumeFn = useRef<{ [key: string]: () => any }>({});
+  const cancelFn = useRef<{ [key: string]: () => any }>({});
 
   // 线程数量
   const THREAD_COUNT_REF = useRef(0);
@@ -119,9 +192,8 @@ export default function Home() {
     chunksHash,
     fileName,
     fileSize,
+    chunksPercentComplete,
   }: ChunkCheckFnParams) {
-    const percentComplete = (1 / chunksHash.length) * 100;
-
     // 当前选择文件的下标
     const curIndex = Object.keys(fileListStatus).length;
 
@@ -139,31 +211,18 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then((res) => {
-        // 根据res.data更新进度条，这里返回值需要和后端协商
-        if (!res.data) return;
-
-        // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态问题）
-        if (!cancelFn.current?.[fileHash + curIndex]) return;
-
-        // 暂停：根据res.data决定是否执行uploadChunk
-        if (pausedStatus.current[fileHash + curIndex]) return res.data;
-
-        // 更新进度条
-        setFileListStatus((preState) => {
-          return {
-            ...preState,
-            [fileHash + curIndex]: {
-              index: curIndex,
-              fileName,
-              size: fileSize,
-              percent:
-                (preState[fileHash + curIndex]?.percent ?? 0) + percentComplete,
-              paused: false,
-            },
-          };
+        updateProgress({
+          res,
+          key: fileHash + curIndex,
+          chunksPercentComplete,
+          curIndex,
+          fileName,
+          fileSize,
+          cancelFn,
+          pausedStatus,
+          realProgress,
+          setFileListStatus,
         });
-        // 注意这里必须返回true，createRequestManager内部会根据返回值决定是否执行uploadChunk
-        return true;
       });
   }
 
@@ -175,9 +234,8 @@ export default function Home() {
     fileName,
     fileSize,
     fileType,
+    chunksPercentComplete,
   }: ChunkUploadFnParams) {
-    const percentComplete = (1 / chunksHash.length) * 100;
-
     const formData = new FormData();
     formData.append("fileChunk", fileChunk, fileName);
     formData.append("fileName", fileName);
@@ -197,28 +255,17 @@ export default function Home() {
     })
       .then((res) => res.json())
       .then((res) => {
-        // 根据res.data更新进度条，这里返回值需要和后端协商
-        if (!res.data) return;
-
-        // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态问题）
-        if (!cancelFn.current?.[fileHash + curIndex]) return;
-
-        // 暂停状态，不更新进度条（处理竞态问题）
-        if (pausedStatus.current[fileHash + curIndex]) return;
-
-        // 更新进度条
-        setFileListStatus((preState) => {
-          return {
-            ...preState,
-            [fileHash + curIndex]: {
-              index: curIndex,
-              fileName,
-              size: fileSize,
-              percent:
-                (preState[fileHash + curIndex]?.percent ?? 0) + percentComplete,
-              paused: false,
-            },
-          };
+        updateProgress({
+          res,
+          key: fileHash + curIndex,
+          chunksPercentComplete,
+          curIndex,
+          fileName,
+          fileSize,
+          cancelFn,
+          pausedStatus,
+          realProgress,
+          setFileListStatus,
         });
       });
   }
@@ -247,6 +294,8 @@ export default function Home() {
 
     // 生成每个分片的请求函数
     const chunkUpload: RequestTask = [];
+    // 每个分片所占进度的百分比
+    const chunksPercentComplete = (1 / chunksHash.length) * 100;
 
     for (let i = 0, j = 0; i < file.size; i += CHUNK_SIZE, j++) {
       const outerCheckChunkFn = (params: ChunkCheckFnParams) => () =>
@@ -263,6 +312,7 @@ export default function Home() {
           index: j,
           fileHash,
           chunksHash,
+          chunksPercentComplete,
         }),
         outerUploadChunkFn({
           fileName: file.name,
@@ -272,6 +322,7 @@ export default function Home() {
           fileChunk: file.slice(i, i + CHUNK_SIZE),
           fileHash,
           chunksHash,
+          chunksPercentComplete,
         }),
       ]);
     }
@@ -354,7 +405,7 @@ export default function Home() {
   return (
     <div className="mt-40 w-fit m-auto">
       {loading && <Loading />}
-      {/* <BallMoveAnimation /> */}
+      <BallMoveAnimation />
       <div className="mb-8">
         worker：
         <input type="file" onChange={selectFileHandle} />
@@ -367,7 +418,7 @@ export default function Home() {
             <div className="flex">
               <Progress
                 className="w-[100%]"
-                percent={Math.ceil(fileListStatus[key].percent)}
+                percent={Math.ceil(fileListStatus[key].progress)}
               />
               <span
                 className="ml-2 whitespace-nowrap border px-1 cursor-pointer"
