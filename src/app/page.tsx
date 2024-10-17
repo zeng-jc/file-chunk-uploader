@@ -1,18 +1,18 @@
 "use client";
 import BallMoveAnimation from "./components/ballMoveAnimation";
 import Progress from "./components/progress";
-import {
+import type {
   ChangeEvent,
   Dispatch,
   MutableRefObject,
   SetStateAction,
-  useEffect,
-  useRef,
-  useState,
 } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RequestTask, createRequestManager, formatFileSize } from "@/utils";
 import TestWorker from "../workers/test.worker";
 import Loading from "./components/Loading/Index";
+
+type ChunkCheckFnParams = Omit<ChunkUploadFnParams, "fileChunk">;
 
 interface ChunkUploadFnParams {
   fileChunk: Blob; // 文件片段
@@ -25,7 +25,15 @@ interface ChunkUploadFnParams {
   chunksPercentComplete: number; // 每个分片所占进度的百分比
 }
 
-type ChunkCheckFnParams = Omit<ChunkUploadFnParams, "fileChunk">;
+interface FileListStatus {
+  [key: string]: {
+    index: number;
+    progress: number;
+    fileName: string;
+    size: number;
+    paused: boolean;
+  };
+}
 
 interface UpdateProgressParams {
   res: any;
@@ -34,23 +42,13 @@ interface UpdateProgressParams {
   curIndex: number;
   fileName: string;
   fileSize: number;
-  cancelFn: MutableRefObject<{ [key: string]: () => any }>;
+  cancelFn: MutableRefObject<{ [key: string]: () => void }>;
   pausedStatus: MutableRefObject<{ [key: string]: boolean }>;
   realProgress: MutableRefObject<{ [key: string]: number }>;
-  setFileListStatus: Dispatch<
-    SetStateAction<{
-      [key: string]: {
-        index: number;
-        progress: number;
-        fileName: string;
-        size: number;
-        paused: boolean;
-      };
-    }>
-  >;
+  setFileListStatus: Dispatch<SetStateAction<FileListStatus>>;
 }
 
-const updateProgress = ({
+const updateProgress = async ({
   res,
   key,
   chunksPercentComplete,
@@ -62,16 +60,18 @@ const updateProgress = ({
   realProgress,
   setFileListStatus,
 }: UpdateProgressParams) => {
-  // 根据res.data更新进度条，这里返回值需要和后端协商
-  if (!res.data) return;
+  // 触发内部重试机制
+  if (res.code !== 200) return Promise.reject(res);
 
-  // 当取消函数不存在，则表示该上传已经取消，不更新进度条（处理竞态问题）
-  if (!cancelFn.current?.[key]) return;
+  // data为false表示需要执行uploadChunk
+  if (!res.data) return false;
 
   realProgress.current[key] ??= 0;
   realProgress.current[key] += chunksPercentComplete;
-  // 暂停状态，不更新进度条（处理竞态问题）
-  if (pausedStatus.current[key]) return;
+  if (realProgress.current[key] > 100) realProgress.current[key] = 100;
+
+  // 取消或暂停，不更新进度条（处理竞态问题）
+  if (!cancelFn.current?.[key] || pausedStatus.current[key]) return res.data;
 
   // 更新进度条
   setFileListStatus((preState) => {
@@ -86,8 +86,9 @@ const updateProgress = ({
       },
     };
   });
-  // 注意这里需要有返回值，createRequestManager内部会根据返回值决定是否执行uploadChunk
-  return res.data;
+
+  // 注意这里需要返回true，createRequestManager内部不会执行uploadChunk
+  return true;
 };
 
 // 交给worker计算hash值
@@ -155,23 +156,15 @@ async function workerCalculateHash(
 export default function Home() {
   const [loading, setLoading] = useState(false);
   // key = hash + index
-  const [fileListStatus, setFileListStatus] = useState<{
-    [key: string]: {
-      index: number;
-      progress: number;
-      fileName: string;
-      size: number;
-      paused: boolean;
-    };
-  }>({});
+  const [fileListStatus, setFileListStatus] = useState<FileListStatus>({});
   const realProgress = useRef<{ [key: string]: number }>({});
   const pausedStatus = useRef<{ [key: string]: boolean }>({});
-  const pauseFn = useRef<{ [key: string]: () => any }>({});
-  const resumeFn = useRef<{ [key: string]: () => any }>({});
-  const cancelFn = useRef<{ [key: string]: () => any }>({});
-
+  const pauseFn = useRef<{ [key: string]: () => void }>({});
+  const resumeFn = useRef<{ [key: string]: () => void }>({});
+  const cancelFn = useRef<{ [key: string]: () => void }>({});
   // 线程数量
   const THREAD_COUNT_REF = useRef(0);
+  // 切片大小
   const CHUNK_SIZE = 5 * 1024 * 1024;
 
   useEffect(() => {
@@ -210,8 +203,8 @@ export default function Home() {
       }),
     })
       .then((res) => res.json())
-      .then((res) => {
-        updateProgress({
+      .then(async (res) => {
+        return await updateProgress({
           res,
           key: fileHash + curIndex,
           chunksPercentComplete,
@@ -254,8 +247,8 @@ export default function Home() {
       body: formData,
     })
       .then((res) => res.json())
-      .then((res) => {
-        updateProgress({
+      .then(async (res) => {
+        return await updateProgress({
           res,
           key: fileHash + curIndex,
           chunksPercentComplete,
@@ -271,6 +264,8 @@ export default function Home() {
   }
 
   const selectFileHandle = async (e: ChangeEvent<HTMLInputElement>) => {
+    if (Object.keys(fileListStatus).length >= 3)
+      return alert("最多同时选择3个文件");
     const startTime = performance.now();
     const file = e.target.files?.[0];
     if (!file) return;
@@ -285,6 +280,9 @@ export default function Home() {
       threadCount: THREAD_COUNT_REF.current,
       chunkSize: CHUNK_SIZE,
     });
+
+    // 清理文件输入框
+    e.target.value = "";
 
     // 计算文件hash
     const fileHash = await workerCalculateHash(chunksHash.toString());
@@ -360,9 +358,21 @@ export default function Home() {
       },
       onCanceled: () => {
         console.log("onCanceled");
+        delete pauseFn.current?.[KEY];
+        delete resumeFn.current?.[KEY];
+        delete cancelFn.current?.[KEY];
+        delete pausedStatus.current?.[KEY];
+        delete realProgress.current?.[KEY];
+        delete fileListStatus[KEY];
+        setFileListStatus((prevState) => {
+          const newState = { ...prevState };
+          delete newState[KEY];
+          return newState;
+        });
       },
-      onCompleted: (res) => {
-        console.log("onCompleted", res);
+      onCompleted: async (res) => {
+        const successChunks = res.filter((item) => item.status === "fulfilled");
+        if (successChunks.length !== chunksHash.length) return;
         // 发起合并请求
         fetch("http://localhost:3000/upload/merge", {
           method: "POST",
@@ -374,8 +384,17 @@ export default function Home() {
           }),
         })
           .then((res) => res.json())
-          .then(() => {
-            console.log("合并成功");
+          .then((res) => {
+            console.log("合并", res.data);
+            if (!fileListStatus[KEY]) return;
+            // 合并成功后直接将进度条设置为100%，解决最后一个上传回调执行时处于暂停状态，导致页面显示进度条更新不满
+            setFileListStatus((preState) => ({
+              ...preState,
+              [KEY]: {
+                ...preState[KEY],
+                progress: 100,
+              },
+            }));
           });
       },
     });
@@ -423,6 +442,9 @@ export default function Home() {
               <span
                 className="ml-2 whitespace-nowrap border px-1 cursor-pointer"
                 onClick={async () => {
+                  // 判断网络是否在线
+                  if (!navigator.onLine)
+                    return alert("网络异常! 网络恢复后会自动继续上传");
                   fileListStatus[key].paused
                     ? resumeFn.current?.[key]()
                     : pauseFn.current?.[key]();
@@ -432,15 +454,7 @@ export default function Home() {
               </span>
               <span
                 className="ml-2 whitespace-nowrap border px-1 cursor-pointer"
-                onClick={() => {
-                  cancelFn.current?.[key]();
-                  delete cancelFn.current?.[key];
-                  setFileListStatus((prevState) => {
-                    const newState = { ...prevState };
-                    delete newState[key];
-                    return newState;
-                  });
-                }}
+                onClick={() => cancelFn.current?.[key]()}
               >
                 取消
               </span>

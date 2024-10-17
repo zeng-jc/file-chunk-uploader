@@ -6,34 +6,32 @@ export function createRequestManager() {
 
   let pauseResolve: (() => void) | null = null;
 
-  let pauseCallback: ((reason?: "offline") => void) | undefined;
-  let resumeCallback: ((reason?: "online") => void) | undefined;
+  let pauseCallback: (() => void) | undefined;
+  let resumeCallback: (() => void) | undefined;
   let cancelCallback: (() => void) | undefined;
 
-  const pause = (reason?: any) => {
+  const pause = () => {
     isPause = true;
-    pauseCallback?.(reason);
+    pauseCallback?.();
   };
 
-  const resume = (reason?: any) => {
+  const resume = () => {
     isPause = false;
     pauseResolve?.();
     pauseResolve = null;
-    resumeCallback?.(reason);
+    resumeCallback?.();
   };
 
   const cancel = () => {
+    window.removeEventListener("offline", pause);
+    window.removeEventListener("online", resume);
     isCancel = true;
     cancelCallback?.();
   };
 
   // 监听网络状态变化
-  window.addEventListener("online", () => {
-    resume("online");
-  });
-  window.addEventListener("offline", () => {
-    pause("offline");
-  });
+  window.addEventListener("online", resume);
+  window.addEventListener("offline", pause);
 
   const limitConcurrentRequests = async (
     requestTasks: RequestTask,
@@ -47,7 +45,7 @@ export function createRequestManager() {
       onPaused?: (reason?: "offline") => void;
       onResumed?: (reason?: "online") => void;
       onCanceled?: () => void;
-      onCompleted?: (reason: any) => void;
+      onCompleted?: (reason: PromiseSettledResult<any>[]) => void;
     }
   ) => {
     resumeCallback = onResumed;
@@ -76,7 +74,7 @@ export function createRequestManager() {
           return requestRetry(uploadRequest);
         })
         .catch(async (err) => {
-          // 失败的分片需要重新上传
+          // catch是为了处理断网的场景 和 重试多次还是失败的场景，失败的分片放到最后上传
           requestTasks.push([checkRequest, uploadRequest]);
           return Promise.reject(err);
         });
@@ -91,7 +89,7 @@ export function createRequestManager() {
       promise.then(responseCallback, responseCallback);
     }
 
-    const completeCallback = (res: any) => {
+    const completeCallback = (res: PromiseSettledResult<any>[]) => {
       onCompleted?.(res);
       window.removeEventListener("offline", pause);
       window.removeEventListener("online", resume);
@@ -124,6 +122,7 @@ export async function requestRetry(
 }
 
 export function formatFileSize(size: number) {
+  if (typeof size !== "number") return "";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let index = 0;
   while (size >= 1024 && index < units.length - 1) {
